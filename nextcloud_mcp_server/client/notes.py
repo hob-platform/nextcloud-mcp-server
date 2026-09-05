@@ -8,6 +8,8 @@ from .webdav import WebDAVClient
 
 logger = logging.getLogger(__name__)
 
+NOTES_REQUEST_HEADERS = {"OCS-APIRequest": "true"}
+
 
 def _expect_note_object(payload: Any, *, operation: str) -> Dict[str, Any]:
     """Coerce a Notes API single-note response into a dict.
@@ -52,7 +54,11 @@ class NotesClient(BaseNextcloudClient):
 
     async def get_settings(self) -> Dict[str, Any]:
         """Get Notes app settings."""
-        response = await self._make_request("GET", "/apps/notes/api/v1/settings")
+        response = await self._make_request(
+            "GET",
+            "/apps/notes/api/v1/settings",
+            headers=NOTES_REQUEST_HEADERS,
+        )
         return response.json()
 
     async def get_all_notes(
@@ -87,6 +93,7 @@ class NotesClient(BaseNextcloudClient):
                 "GET",
                 "/apps/notes/api/v1/notes",
                 params=params,
+                headers=NOTES_REQUEST_HEADERS,
             )
             response_data = response.json()
 
@@ -114,7 +121,9 @@ class NotesClient(BaseNextcloudClient):
     async def get_note(self, note_id: int) -> Dict[str, Any]:
         """Get a specific note by ID."""
         response = await self._make_request(
-            "GET", f"/apps/notes/api/v1/notes/{note_id}"
+            "GET",
+            f"/apps/notes/api/v1/notes/{note_id}",
+            headers=NOTES_REQUEST_HEADERS,
         )
         return _expect_note_object(response.json(), operation="get_note")
 
@@ -134,7 +143,10 @@ class NotesClient(BaseNextcloudClient):
             body["category"] = category
 
         response = await self._make_request(
-            "POST", "/apps/notes/api/v1/notes", json=body
+            "POST",
+            "/apps/notes/api/v1/notes",
+            json=body,
+            headers=NOTES_REQUEST_HEADERS,
         )
         return _expect_note_object(response.json(), operation="create_note")
 
@@ -177,7 +189,7 @@ class NotesClient(BaseNextcloudClient):
             "PUT",
             f"/apps/notes/api/v1/notes/{note_id}",
             json=body,
-            headers={"If-Match": f'"{etag}"'},
+            headers={**NOTES_REQUEST_HEADERS, "If-Match": f'"{etag}"'},
         )
 
         logger.info(
@@ -239,7 +251,9 @@ class NotesClient(BaseNextcloudClient):
         # Delete the note via API
         logger.info("Deleting note %s via API", note_id)
         response = await self._make_request(
-            "DELETE", f"/apps/notes/api/v1/notes/{note_id}"
+            "DELETE",
+            f"/apps/notes/api/v1/notes/{note_id}",
+            headers=NOTES_REQUEST_HEADERS,
         )
         logger.info("Note %s deleted successfully via API", note_id)
         json_response = response.json()

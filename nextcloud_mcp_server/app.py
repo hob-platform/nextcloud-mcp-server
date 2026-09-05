@@ -148,6 +148,14 @@ logger = logging.getLogger(__name__)
 HTTPXClientInstrumentor().instrument()
 
 
+def _redacted_authorization_for_log(auth_header: str | None) -> str | None:
+    """Return a non-secret marker for an Authorization header."""
+    if not auth_header:
+        return None
+    scheme = auth_header.split(" ", 1)[0].strip()
+    return f"{scheme} <redacted>" if scheme else "<redacted>"
+
+
 def build_dcr_scopes(*, vector_sync_enabled: bool, offline_access_enabled: bool) -> str:
     """Build the space-separated scope list this server registers via DCR.
 
@@ -3134,11 +3142,10 @@ def get_app(transport: str = "streamable-http", enabled_apps: list[str] | None =
         auth_header = request.headers.get("authorization")
         if request.url.path.startswith("/mcp"):
             if auth_header:
-                # Log first 50 chars of token for debugging
-                token_preview = (
-                    auth_header[:50] + "..." if len(auth_header) > 50 else auth_header
+                logger.info(
+                    "🔑 /mcp request with Authorization: %s",
+                    _redacted_authorization_for_log(auth_header),
                 )
-                logger.info("🔑 /mcp request with Authorization: %s", token_preview)
             else:
                 # Only warn about missing Authorization in OAuth mode
                 # In BasicAuth mode, /mcp requests without Authorization are expected
