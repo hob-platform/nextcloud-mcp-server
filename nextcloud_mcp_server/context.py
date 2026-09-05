@@ -35,7 +35,8 @@ async def get_client(ctx: Context) -> NextcloudClient:
     1. BasicAuth mode: Returns shared client from lifespan context
     2. Login Flow v2: OAuth for MCP session, app password for Nextcloud API
     3. Multi-user BasicAuth: Credentials passed through from request headers
-    4. OAuth multi-audience: Token contains both MCP and Nextcloud audiences
+    4. Multi-user Bearer: Bearer token passed through from request headers
+    5. OAuth multi-audience: Token contains both MCP and Nextcloud audiences
 
     This function automatically detects the authentication mode by checking
     the type of the lifespan context.
@@ -58,6 +59,12 @@ async def get_client(ctx: Context) -> NextcloudClient:
         ```
     """
     settings = get_settings()
+
+    # Multi-user Bearer pass-through mode - extract the Nextcloud bearer token
+    # from request state. This mode intentionally does not use MCP OAuth
+    # verification; Nextcloud/user_oidc is the resource-server verifier.
+    if getattr(settings, "enable_multi_user_bearer_auth", False):
+        return _get_client_from_bearer_auth(ctx)
 
     # Multi-user BasicAuth pass-through mode - extract credentials from request
     if settings.enable_multi_user_basic_auth:
@@ -151,6 +158,69 @@ def _get_client_from_basic_auth(ctx: Context) -> NextcloudClient:
         username=username,
         auth=BasicAuth(username, password),
         password=password,
+    )
+
+
+def _get_client_from_bearer_auth(ctx: Context) -> NextcloudClient:
+    """
+    Create NextcloudClient from a Bearer token in request headers.
+
+    For multi-user Bearer pass-through mode, the middleware stores the raw
+    Authorization: Bearer token in request state for this request only. The
+    token is forwarded unchanged to Nextcloud APIs; the server does not persist
+    it or use it as its own identity.
+
+    Args:
+        ctx: MCP request context with bearer_auth in request state
+
+    Returns:
+        NextcloudClient configured with Bearer authentication
+
+    Raises:
+        ValueError: If Bearer token or username claim is missing, or if
+                   NEXTCLOUD_HOST is not configured
+    """
+    settings = get_settings()
+
+    if not settings.nextcloud_host:
+        raise ValueError(
+            "NEXTCLOUD_HOST environment variable must be set for multi-user Bearer mode"
+        )
+
+    scope = getattr(ctx.request_context.request, "scope", None)
+    if scope is None:
+        raise ValueError("Request scope not available in context")
+
+    request_state = scope.get("state", {})
+    bearer_auth = request_state.get("bearer_auth")
+
+    if not bearer_auth:
+        raise ValueError(
+            "Bearer token not found in request. "
+            "Ensure Authorization: Bearer header is provided."
+        )
+
+    token = bearer_auth.get("token")
+    username = bearer_auth.get("username")
+
+    if not token:
+        raise ValueError("Invalid Bearer auth state - missing token")
+    if not username:
+        raise ValueError(
+            "Bearer token does not include a supported Nextcloud username claim "
+            "(nextcloud_uid, preferred_username, uid, or sub)"
+        )
+
+    logger.debug(
+        "Creating multi-user Bearer client for %s as %s",
+        settings.nextcloud_host,
+        username,
+    )
+
+    return NextcloudClient.from_token(
+        base_url=settings.nextcloud_host,
+        token=token,
+        username=username,
     )
 
 

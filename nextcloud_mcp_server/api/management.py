@@ -336,6 +336,8 @@ async def get_server_status(request: Request) -> JSONResponse:
         auth_mode = "oauth"
     elif mode == AuthMode.MULTI_USER_BASIC:
         auth_mode = "multi_user_basic"
+    elif mode == AuthMode.MULTI_USER_BEARER:
+        auth_mode = "multi_user_bearer"
     elif mode == AuthMode.SINGLE_USER_BASIC:
         auth_mode = "basic"
     else:

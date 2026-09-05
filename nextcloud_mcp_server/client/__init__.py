@@ -34,13 +34,17 @@ logger = logging.getLogger(__name__)
 
 
 async def log_request(request: Request):
+    headers = dict(request.headers)
+    if "authorization" in headers:
+        headers["authorization"] = "<redacted>"
+
     logger.debug(
         "Request event hook: %s %s - Waiting for content",
         request.method,
         request.url,
     )
     logger.debug("Request body: %s", request.content)
-    logger.debug("Headers: %s", request.headers)
+    logger.debug("Headers: %s", headers)
 
 
 async def log_response(response: Response):

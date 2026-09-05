@@ -41,6 +41,17 @@ class TestModeDetection:
         assert mode == AuthMode.MULTI_USER_BASIC
         assert settings.enable_multi_user_basic_auth is True
 
+    def test_multi_user_bearer_mode_detection(self):
+        """Test multi-user Bearer pass-through mode is explicit only."""
+        settings = Settings(
+            nextcloud_host="http://localhost",
+            deployment_mode="multi_user_bearer",
+        )
+
+        mode = detect_auth_mode(settings)
+        assert mode == AuthMode.MULTI_USER_BEARER
+        assert settings.enable_multi_user_bearer_auth is True
+
     def test_single_user_basic_mode_detection(self):
         """Test single-user BasicAuth mode is detected."""
         settings = Settings(
@@ -295,7 +306,69 @@ class TestMultiUserBasicValidation:
             # Should have no errors - background operations auto-enabled
             assert len(errors) == 0
             # Verify background operations were auto-enabled
-            assert settings.enable_offline_access is True
+        assert settings.enable_offline_access is True
+
+
+class TestMultiUserBearerValidation:
+    """Test validation for experimental multi-user Bearer mode."""
+
+    def test_valid_minimal_config(self):
+        """Test valid minimal multi-user Bearer config."""
+        settings = Settings(
+            nextcloud_host="http://localhost",
+            deployment_mode="multi_user_bearer",
+        )
+
+        mode, errors = validate_configuration(settings)
+
+        assert mode == AuthMode.MULTI_USER_BEARER
+        assert len(errors) == 0
+        assert settings.enable_multi_user_bearer_auth is True
+        assert settings.enable_multi_user_basic_auth is False
+        assert settings.enable_login_flow is False
+
+    def test_missing_required_host(self):
+        """Test error when NEXTCLOUD_HOST is missing."""
+        settings = Settings(deployment_mode="multi_user_bearer")
+
+        mode, errors = validate_configuration(settings)
+
+        assert mode == AuthMode.MULTI_USER_BEARER
+        assert any("nextcloud_host" in err.lower() for err in errors)
+
+    def test_forbidden_username_password(self):
+        """Bearer mode must not have static Nextcloud credentials."""
+        settings = Settings(
+            nextcloud_host="http://localhost",
+            nextcloud_username="admin",
+            nextcloud_password="password",
+            deployment_mode="multi_user_bearer",
+        )
+
+        mode, errors = validate_configuration(settings)
+
+        assert mode == AuthMode.MULTI_USER_BEARER
+        assert any("nextcloud_username" in err.lower() for err in errors)
+        assert any("nextcloud_password" in err.lower() for err in errors)
+
+    def test_forbids_background_sync_for_now(self):
+        """The PoC mode is per-request only, not an offline sync mode."""
+        settings = Settings(
+            nextcloud_host="http://localhost",
+            deployment_mode="multi_user_bearer",
+            vector_sync_enabled=True,
+            enable_offline_access=True,
+            token_encryption_key="test-key",
+            token_storage_db="/tmp/tokens.db",
+        )
+
+        mode, errors = validate_configuration(settings)
+
+        assert mode == AuthMode.MULTI_USER_BEARER
+        assert any("vector_sync_enabled" in err.lower() for err in errors)
+        assert any("enable_offline_access" in err.lower() for err in errors)
+        assert any("token_encryption_key" in err.lower() for err in errors)
+        assert any("token_storage_db" in err.lower() for err in errors)
 
 
 class TestLoginFlowValidation:
@@ -824,6 +897,27 @@ class TestExplicitModeSelection:
             mode = detect_auth_mode(settings)
 
             assert mode == AuthMode.MULTI_USER_BASIC
+
+    def test_explicit_multi_user_bearer_mode(self):
+        """Test explicit multi_user_bearer mode selection."""
+        with patch.dict(
+            os.environ,
+            {
+                "NEXTCLOUD_HOST": "http://localhost:8080",
+                "MCP_DEPLOYMENT_MODE": "multi_user_bearer",
+            },
+            clear=True,
+        ):
+            from nextcloud_mcp_server.config import get_settings
+
+            _reload_config()
+            settings = get_settings()
+            mode = detect_auth_mode(settings)
+
+            assert mode == AuthMode.MULTI_USER_BEARER
+            assert settings.enable_multi_user_bearer_auth is True
+            assert settings.enable_multi_user_basic_auth is False
+            assert settings.enable_login_flow is False
 
     def test_explicit_login_flow_mode(self):
         """Test explicit login_flow mode selection."""

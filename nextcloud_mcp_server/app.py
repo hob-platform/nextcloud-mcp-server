@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import binascii
 import json
 import logging
 import os
@@ -825,6 +826,76 @@ class BasicAuthMiddleware:
         await self.app(scope, receive, send)
 
 
+def _decode_jwt_payload_unverified(token: str) -> dict[str, Any]:
+    """Decode a JWT payload without verification for routing hints only.
+
+    Nextcloud remains the resource-server verifier. The MCP server uses these
+    claims only to construct DAV paths for the per-request client.
+    """
+    parts = token.split(".")
+    if len(parts) < 2:
+        return {}
+
+    payload = parts[1]
+    padding = "=" * (-len(payload) % 4)
+    try:
+        decoded = base64.urlsafe_b64decode(f"{payload}{padding}")
+        data = json.loads(decoded.decode("utf-8"))
+    except (binascii.Error, UnicodeDecodeError, json.JSONDecodeError):
+        return {}
+
+    return data if isinstance(data, dict) else {}
+
+
+def _username_from_bearer_claims(claims: dict[str, Any]) -> str | None:
+    """Choose the Nextcloud UID from common OIDC/user_oidc claim names."""
+    for claim_name in ("nextcloud_uid", "preferred_username", "uid", "sub"):
+        value = claims.get(claim_name)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+class BearerAuthMiddleware:
+    """Extract per-request Bearer tokens for Nextcloud pass-through mode.
+
+    The raw token is stored only in ASGI request state for the duration of the
+    request. It is never logged or persisted by this middleware.
+    """
+
+    def __init__(self, app: ASGIApp):
+        self.app = app
+
+    async def __call__(
+        self, scope: StarletteScope, receive: Receive, send: Send
+    ) -> None:
+        if scope["type"] == "http":
+            headers = dict(scope.get("headers", []))
+            auth_header = headers.get(b"authorization", b"")
+
+            if auth_header.startswith(b"Bearer "):
+                try:
+                    token = auth_header[7:].decode("ascii").strip()
+                except UnicodeDecodeError:
+                    token = ""
+                if token:
+                    claims = _decode_jwt_payload_unverified(token)
+                    username = _username_from_bearer_claims(claims)
+
+                    scope.setdefault("state", {})
+                    scope["state"]["bearer_auth"] = {
+                        "token": token,
+                        "username": username,
+                    }
+                    logger.debug(
+                        "Bearer token extracted for Nextcloud pass-through; "
+                        "username claim present: %s",
+                        bool(username),
+                    )
+
+        await self.app(scope, receive, send)
+
+
 async def load_oauth_client_credentials(
     nextcloud_host: str, registration_endpoint: str | None
 ) -> tuple[str, str]:
@@ -939,7 +1010,8 @@ async def app_lifespan_basic(server: MCPServer) -> AsyncIterator[AppContext]:
     For single-user mode: Creates a single Nextcloud client with basic authentication
     that is shared across all requests within a session.
 
-    For multi-user mode: No shared client - clients created per-request by BasicAuthMiddleware.
+    For multi-user pass-through modes: No shared client - clients are created
+    per-request by BasicAuthMiddleware or BearerAuthMiddleware.
 
     Note: Background tasks (scanner, processor) are started at server level
     in starlette_lifespan, not here. mcp 2.x enters this lifespan once, when the
@@ -947,10 +1019,13 @@ async def app_lifespan_basic(server: MCPServer) -> AsyncIterator[AppContext]:
     session and request (1.x entered it per session).
     """
     settings = get_settings()
-    is_multi_user = settings.enable_multi_user_basic_auth
+    is_multi_user = (
+        settings.enable_multi_user_basic_auth
+        or getattr(settings, "enable_multi_user_bearer_auth", False)
+    )
 
     logger.info(
-        "Starting MCP session in %s BasicAuth mode",
+        "Starting MCP session in %s BasicAuth-compatible mode",
         "multi-user" if is_multi_user else "single-user",
     )
 
@@ -962,7 +1037,7 @@ async def app_lifespan_basic(server: MCPServer) -> AsyncIterator[AppContext]:
         logger.info("Client initialization complete")
     else:
         logger.info(
-            "Multi-user mode - clients created per-request from BasicAuth headers"
+            "Multi-user mode - clients created per-request from Authorization headers"
         )
 
     # Initialize persistent storage (tokens, sessions, app passwords)
@@ -2198,6 +2273,7 @@ def get_app(transport: str = "streamable-http", enabled_apps: list[str] | None =
             settings.vector_sync_enabled
             and not oauth_enabled
             and not settings.enable_multi_user_basic_auth
+            and not getattr(settings, "enable_multi_user_bearer_auth", False)
         ):
             # BasicAuth mode - single user sync
             logger.info("Starting background vector sync tasks for BasicAuth mode")
@@ -2585,6 +2661,11 @@ def get_app(transport: str = "streamable-http", enabled_apps: list[str] | None =
                     logger.warning(
                         "Vector sync enabled but TOKEN_ENCRYPTION_KEY not set"
                     )
+                elif getattr(settings, "enable_multi_user_bearer_auth", False):
+                    logger.warning(
+                        "Vector sync enabled but multi_user_bearer does not support "
+                        "background sync in this experimental pass-through mode"
+                    )
             # start/teardown stay no-op; the shared runner yields below.
 
         # One shared task group runs this mode's background tasks plus the
@@ -2656,6 +2737,9 @@ def get_app(transport: str = "streamable-http", enabled_apps: list[str] | None =
             checks["auth_configured"] = "ok"
             # Indicate if app passwords are supported (when offline_access enabled)
             checks["supports_app_passwords"] = settings.enable_offline_access
+        elif mode == AuthMode.MULTI_USER_BEARER:
+            checks["auth_mode"] = "multi_user_bearer"
+            checks["auth_configured"] = "ok"
         elif mode == AuthMode.SINGLE_USER_BASIC:
             checks["auth_mode"] = "basic"
             if settings.nextcloud_username and settings.nextcloud_password:
@@ -3194,11 +3278,16 @@ def get_app(transport: str = "streamable-http", enabled_apps: list[str] | None =
 
         logger.info("WWW-Authenticate scope challenge handler enabled")
 
-    # Apply BasicAuthMiddleware for multi-user BasicAuth pass-through mode
+    # Apply pass-through auth middleware for multi-user Authorization header modes.
     if settings.enable_multi_user_basic_auth:
         app = BasicAuthMiddleware(app)
         logger.info(
             "BasicAuthMiddleware enabled - multi-user BasicAuth pass-through mode active"
+        )
+    elif getattr(settings, "enable_multi_user_bearer_auth", False):
+        app = BearerAuthMiddleware(app)
+        logger.info(
+            "BearerAuthMiddleware enabled - multi-user Bearer pass-through mode active"
         )
 
     return app
