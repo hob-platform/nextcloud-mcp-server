@@ -25,6 +25,7 @@ class AuthMode(Enum):
 
     SINGLE_USER_BASIC = "single_user_basic"
     MULTI_USER_BASIC = "multi_user_basic"
+    MULTI_USER_BEARER = "multi_user_bearer"
     LOGIN_FLOW = "login_flow"
 
 
@@ -155,6 +156,25 @@ MODE_REQUIREMENTS: dict[AuthMode, ModeRequirements] = {
         "Replaces the deprecated direct OAuth bearer-token pass-through which "
         "required unmerged user_oidc patches (see ADR-022).",
     ),
+    AuthMode.MULTI_USER_BEARER: ModeRequirements(
+        required=["nextcloud_host"],
+        optional=[
+            "nextcloud_oidc_scopes",
+        ],
+        forbidden=[
+            "nextcloud_username",
+            "nextcloud_password",
+            "enable_offline_access",
+            "vector_sync_enabled",
+            "token_encryption_key",
+            "token_storage_db",
+        ],
+        conditional={},
+        description="Experimental multi-user deployment with Bearer token "
+        "pass-through. The MCP client sends Authorization: Bearer per request; "
+        "the server forwards that token to Nextcloud APIs and stores nothing. "
+        "Nextcloud/user_oidc must validate the token and map it to a real user.",
+    ),
 }
 
 
@@ -164,8 +184,9 @@ def detect_auth_mode(settings: Settings) -> AuthMode:
     Mode detection priority (ADR-021, updated for ADR-022):
     0. Explicit MCP_DEPLOYMENT_MODE (if set) — NEW in ADR-021
     1. Multi-user BasicAuth (only via explicit mode after ADR-022 follow-up)
-    2. Single-user BasicAuth (auto-detected from credentials)
-    3. Login Flow v2 (default — was OAuth single-audience pre-ADR-022)
+    2. Multi-user Bearer pass-through (explicit mode only)
+    3. Single-user BasicAuth (auto-detected from credentials)
+    4. Login Flow v2 (default — was OAuth single-audience pre-ADR-022)
 
     Pure function — the legacy-env-var deprecation and the derivation of
     `enable_login_flow` / `enable_multi_user_basic_auth` now happen in
@@ -194,6 +215,7 @@ def detect_auth_mode(settings: Settings) -> AuthMode:
         mode_map = {
             "single_user_basic": AuthMode.SINGLE_USER_BASIC,
             "multi_user_basic": AuthMode.MULTI_USER_BASIC,
+            "multi_user_bearer": AuthMode.MULTI_USER_BEARER,
             "login_flow": AuthMode.LOGIN_FLOW,
         }
 

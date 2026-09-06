@@ -88,9 +88,10 @@ _DEFAULTS: dict[str, Any] = {
     "nextcloud_mcp_service_name": "mcp",
     "nextcloud_mcp_port": 8000,
     # Mode flags
-    # NOTE: `enable_multi_user_basic_auth` and `enable_login_flow` are
+    # NOTE: `enable_multi_user_basic_auth`,
+    # `enable_multi_user_bearer_auth`, and `enable_login_flow` are
     # intentionally absent — they are derived from MCP_DEPLOYMENT_MODE in
-    # Settings.__post_init__ (ADR-022) and not read from the dynaconf store.
+    # Settings.__post_init__ and not read from the dynaconf store.
     # Escape hatch for the per-tool capability gate (capabilities.py). Set
     # MCP_DISABLE_CAPABILITY_GATING=true to list and run every registered tool
     # regardless of what the instance advertises — the answer to "why did my
@@ -1123,6 +1124,13 @@ class Settings:
     # as a field for backward compat with the runtime call sites that read it.
     enable_multi_user_basic_auth: bool = False
 
+    # Multi-user Bearer pass-through mode. Internal — not user-settable.
+    # Auto-set by Settings.__post_init__ when
+    # MCP_DEPLOYMENT_MODE=multi_user_bearer. When True, the MCP server extracts
+    # the caller's Authorization: Bearer token from request headers and passes
+    # it through to Nextcloud APIs without storing it.
+    enable_multi_user_bearer_auth: bool = False
+
     # Login Flow v2 derived flag (ADR-022). Internal — not user-settable.
     # Auto-set by Settings.__post_init__ when the resolved deployment mode is
     # LOGIN_FLOW. Kept as a field for backward compat with the runtime call
@@ -1799,7 +1807,8 @@ class Settings:
         #    wrong runtime mode). Only fires for truthy strings, so an
         #    explicit `ENABLE_LOGIN_FLOW=false` in a leftover .env passes
         #    through harmlessly.
-        # 2. Derive `enable_login_flow` and `enable_multi_user_basic_auth`
+        # 2. Derive `enable_login_flow`, `enable_multi_user_basic_auth`, and
+        #    `enable_multi_user_bearer_auth`
         #    from the resolved deployment mode here, in __post_init__, so
         #    every Settings instance carries correct flags. (`get_settings()`
         #    builds a fresh Settings on each call — without this, the
@@ -1844,6 +1853,7 @@ class Settings:
                 resolved_mode = "login_flow"
 
         self.enable_multi_user_basic_auth = resolved_mode == "multi_user_basic"
+        self.enable_multi_user_bearer_auth = resolved_mode == "multi_user_bearer"
         self.enable_login_flow = resolved_mode == "login_flow"
 
     def _detect_base_provider(self) -> tuple[str, str]:
@@ -2023,7 +2033,8 @@ _ENV_OVERRIDE = {
 # Derived fields with no env var of their own, so there is nothing to map:
 # ``vector_sync_enabled``/``enable_offline_access`` come from the
 # ENABLE_SEMANTIC_SEARCH / ENABLE_BACKGROUND_OPERATIONS resolution, and
-# ``enable_login_flow``/``enable_multi_user_basic_auth`` from the deployment
+# ``enable_login_flow``/``enable_multi_user_basic_auth``/
+# ``enable_multi_user_bearer_auth`` from the deployment
 # mode (the latter two aren't even dynaconf keys — see ``_DEFAULTS``).
 #
 # Excluding them is currently belt-and-braces rather than load-bearing: both
@@ -2038,6 +2049,7 @@ _COMPUTED_FIELDS = frozenset(
         "enable_offline_access",
         "enable_login_flow",
         "enable_multi_user_basic_auth",
+        "enable_multi_user_bearer_auth",
     }
 )
 
@@ -2092,6 +2104,7 @@ def _is_multi_user_mode() -> bool:
 
     Multi-user modes are:
     - Multi-user BasicAuth (MCP_DEPLOYMENT_MODE=multi_user_basic)
+    - Multi-user Bearer pass-through (MCP_DEPLOYMENT_MODE=multi_user_bearer)
     - Login Flow v2 / default OAuth (MCP_DEPLOYMENT_MODE=login_flow, or no
       username/password and no explicit mode)
 
@@ -2105,7 +2118,7 @@ def _is_multi_user_mode() -> bool:
     # alias was removed in the ADR-022 follow-up; selection is now via
     # MCP_DEPLOYMENT_MODE.
     explicit_mode = str(_dynaconf.get("MCP_DEPLOYMENT_MODE", "") or "").lower().strip()
-    if explicit_mode in {"multi_user_basic", "login_flow"}:
+    if explicit_mode in {"multi_user_basic", "multi_user_bearer", "login_flow"}:
         return True
     if explicit_mode == "single_user_basic":
         return False

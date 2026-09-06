@@ -9,9 +9,33 @@ not list"``.
 
 import pytest
 
-from nextcloud_mcp_server.client.notes import _expect_note_object
+from nextcloud_mcp_server.client.notes import NotesClient, _expect_note_object
 
 pytestmark = pytest.mark.unit
+
+
+class _Response:
+    def __init__(self, payload, headers=None):
+        self._payload = payload
+        self.headers = headers or {}
+        self.status_code = 200
+        self.content = b""
+
+    def json(self):
+        return self._payload
+
+    def raise_for_status(self):
+        return None
+
+
+class _RecordingHTTPClient:
+    def __init__(self, *responses):
+        self.responses = list(responses)
+        self.requests = []
+
+    async def request(self, method, url, **kwargs):
+        self.requests.append((method, url, kwargs))
+        return self.responses.pop(0)
 
 
 def test_dict_payload_passes_through():
@@ -63,3 +87,24 @@ def test_list_of_non_dict_raises_clear_error():
     with pytest.raises(ValueError) as exc:
         _expect_note_object(["not a note"], operation="get_note")
     assert "list-shaped payload" in str(exc.value)
+
+
+async def test_notes_settings_sends_ocs_api_header():
+    http = _RecordingHTTPClient(_Response({}))
+    client = NotesClient(http, "alice")
+
+    await client.get_settings()
+
+    assert http.requests[0][2]["headers"] == {"OCS-APIRequest": "true"}
+
+
+async def test_notes_update_keeps_if_match_with_ocs_api_header():
+    http = _RecordingHTTPClient(_Response({"id": 1, "title": "Updated"}))
+    client = NotesClient(http, "alice")
+
+    await client.update(1, "etag-1", title="Updated")
+
+    assert http.requests[0][2]["headers"] == {
+        "OCS-APIRequest": "true",
+        "If-Match": '"etag-1"',
+    }

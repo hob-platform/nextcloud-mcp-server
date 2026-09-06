@@ -1,6 +1,6 @@
 # Authentication
 
-The Nextcloud MCP server authenticates to Nextcloud using **app-specific passwords** (HTTP Basic Auth). It supports three deployment modes that differ in how those credentials are sourced.
+The Nextcloud MCP server usually authenticates to Nextcloud using **app-specific passwords** (HTTP Basic Auth). It also has an experimental Bearer pass-through mode for deployments where Nextcloud/user_oidc already accepts the caller's access token on DAV and app APIs.
 
 ## Mode Comparison
 
@@ -9,8 +9,9 @@ The Nextcloud MCP server authenticates to Nextcloud using **app-specific passwor
 | **Single-User (BasicAuth)** | App password in environment variables | Personal use, development, single-tenant deployments |
 | **Multi-User (BasicAuth pass-through)** | MCP client sends credentials in HTTP `Authorization` header | Internal multi-user setups where users manage their own Nextcloud credentials |
 | **Multi-User (Login Flow v2)** | Per-user app password obtained via Nextcloud's [Login Flow v2](https://docs.nextcloud.com/server/latest/developer_manual/client_apis/LoginFlow/index.html#login-flow-v2), stored encrypted | Hosted deployments, OAuth-based MCP clients (claude.ai, Astrolabe Cloud), production multi-user |
+| **Multi-User (Bearer pass-through, experimental)** | MCP client sends an access token in HTTP `Authorization: Bearer`; server forwards it to Nextcloud | Environments with proven Nextcloud/user_oidc Bearer-token validation and user mapping |
 
-> **OAuth-direct-to-Nextcloud is no longer supported.** It required upstream patches to `user_oidc` that were never merged. Login Flow v2 replaces it for multi-user deployments and works with stock Nextcloud 16+. See [ADR-022](ADR-022-deployment-mode-consolidation.md) for the rationale.
+> **OAuth-direct-to-Nextcloud is not generally supported on stock Nextcloud.** It historically required upstream patches to `user_oidc` that were not available everywhere, so Login Flow v2 remains the default for portable hosted deployments. `multi_user_bearer` is intentionally explicit and should only be enabled after a live Nextcloud/user_oidc DAV/API smoke test.
 
 ## Single-User (BasicAuth)
 
@@ -67,6 +68,26 @@ The MCP server enforces per-app scopes (`notes.read`, `talk.write`, `files.read`
 
 **See [Login Flow v2](login-flow-v2.md) for full setup, architecture, scope reference, and troubleshooting.**
 
+## Multi-User (Bearer Pass-Through, Experimental)
+
+In this mode, the MCP client sends a per-request `Authorization: Bearer <token>` header. The server extracts that token, decodes common username claims (`nextcloud_uid`, `preferred_username`, `uid`, then `sub`) only to build DAV paths, and forwards the original token unchanged to Nextcloud APIs.
+
+### Configuration
+
+```bash
+NEXTCLOUD_HOST=https://your.nextcloud.example.com
+MCP_DEPLOYMENT_MODE=multi_user_bearer
+```
+
+`NEXTCLOUD_USERNAME` and `NEXTCLOUD_PASSWORD` must NOT be set in this mode. Token storage, offline access, and vector background sync are not supported by this experimental pass-through mode.
+
+### Trade-offs
+
+- Stateless - no app passwords or refresh tokens are stored by the MCP server
+- Preserves the caller's Nextcloud security context when Nextcloud/user_oidc validates the token
+- Requires Nextcloud/user_oidc to accept the Bearer token on every API surface you plan to expose
+- Requires the token to carry a stable Nextcloud UID claim for DAV path construction
+
 ## Mode Detection
 
 The server detects the active mode from environment variables at startup:
@@ -75,6 +96,7 @@ The server detects the active mode from environment variables at startup:
 |------------------|---------------|
 | `NEXTCLOUD_USERNAME` + `NEXTCLOUD_PASSWORD` | Single-User (BasicAuth) |
 | `MCP_DEPLOYMENT_MODE=multi_user_basic` | Multi-User (BasicAuth pass-through) |
+| `MCP_DEPLOYMENT_MODE=multi_user_bearer` | Multi-User (Bearer pass-through, experimental) |
 | `MCP_DEPLOYMENT_MODE=login_flow` or no auth env vars set | Multi-User (Login Flow v2) |
 
 You can also force a mode via CLI flag:
